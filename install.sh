@@ -8,7 +8,7 @@
 set -euo pipefail
 umask 077
 
-VERSION=1.0.0
+VERSION=1.1.0
 
 BIN=/usr/local/bin/xray
 ASSETS=/usr/local/share/xray
@@ -16,8 +16,12 @@ ETC=/usr/local/etc/xray
 CONF=$ETC/config.json
 STATE=$ETC/xhttp-reality.env
 USERS=$ETC/users
+CDN_CERT=$ETC/cdn.crt
+CDN_KEY=$ETC/cdn.key
 UNIT=/etc/systemd/system/xray.service
 REPO=XTLS/Xray-core
+# HTTPS ports Cloudflare proxies (developers.cloudflare.com/fundamentals/reference/network-ports/)
+CF_PORTS="443 2053 2083 2087 2096 8443"
 
 port=
 sni=
@@ -30,6 +34,12 @@ new_keys=0
 force=0
 qr=0
 json=0
+security=reality
+domain=
+cdn_address=
+cert=./origin.pem
+key=./origin.key
+undo=0
 
 usage() {
 	cat <<EOF
@@ -37,6 +47,8 @@ xhttp-reality $VERSION
 
 usage: bash install.sh [install] --sni DOMAIN [options]
        bash install.sh check DOMAIN
+       bash install.sh cdn DOMAIN [--cert FILE] [--key FILE] [--address IP] | cdn --undo
+       bash install.sh check-cdn DOMAIN
        bash install.sh show [NAME] [--qr|--json]
        bash install.sh add NAME | del NAME | users
        bash install.sh uninstall
@@ -51,6 +63,14 @@ install options:
   --firewall         turn ufw on: ssh + this port only
   --new-keys         new keys, short id and path on reinstall
   --force            install even if the sni check fails
+
+cdn (server behind Cloudflare; REALITY can't work behind a CDN, so it switches to TLS):
+  DOMAIN             your proxied (orange cloud) name, e.g. sub.example.com
+  --cert FILE        origin certificate from Cloudflare (./origin.pem)
+  --key FILE         its private key (./origin.key)
+  --address IP       put a clean Cloudflare IP in links instead of DOMAIN
+  --undo             back to REALITY with the old keys
+  it writes and tests the config; restart xray when your DNS record and links are ready
 EOF
 }
 
@@ -147,6 +167,15 @@ load_state() {
 	[ -f "$STATE" ] || die "not installed yet"
 	# shellcheck disable=SC1090
 	. "$STATE"
+	# state files from 1.0.0 have no cdn lines
+	SECURITY=${SECURITY:-reality} DOMAIN=${DOMAIN:-} CDN_ADDRESS=${CDN_ADDRESS:-}
+}
+
+# the lowercase variables write_config and save_state use, from the saved state
+use_state() {
+	# shellcheck disable=SC2153 # PORT, TRANSPORT, ADDRESS come from the state file
+	port=$PORT sni=$SNI transport=$TRANSPORT address=$ADDRESS priv=$PRIVATE_KEY pub=$PUBLIC_KEY
+	sid=$SHORT_ID xpath=$XHTTP_PATH security=$SECURITY domain=$DOMAIN cdn_address=$CDN_ADDRESS
 }
 
 save_state() {
@@ -159,6 +188,9 @@ PRIVATE_KEY=$priv
 PUBLIC_KEY=$pub
 SHORT_ID=$sid
 XHTTP_PATH=$xpath
+SECURITY=$security
+DOMAIN=$domain
+CDN_ADDRESS=$cdn_address
 EOF
 	chmod 600 "$STATE"
 }
@@ -213,19 +245,40 @@ clients_json() {
 }
 
 write_config() {
-	local stream
+	local stream tag=reality-in
 	if [ "$transport" = vision ]; then
 		stream='"network": "raw",'
+	elif [ "$security" = tls ]; then
+		stream="\"network\": \"xhttp\",
+        \"xhttpSettings\": { \"path\": \"$xpath\", \"mode\": \"packet-up\" },"
 	else
 		stream="\"network\": \"xhttp\",
         \"xhttpSettings\": { \"path\": \"$xpath\" },"
+	fi
+	if [ "$security" = tls ]; then
+		tag=cdn-in
+		stream+="
+        \"security\": \"tls\",
+        \"tlsSettings\": {
+          \"alpn\": [\"h2\", \"http/1.1\"],
+          \"certificates\": [{ \"certificateFile\": \"$CDN_CERT\", \"keyFile\": \"$CDN_KEY\" }]
+        }"
+	else
+		stream+="
+        \"security\": \"reality\",
+        \"realitySettings\": {
+          \"target\": \"$sni:443\",
+          \"serverNames\": [\"$sni\"],
+          \"privateKey\": \"$priv\",
+          \"shortIds\": [\"$sid\"]
+        }"
 	fi
 	cat >"$ETC/config.new.json" <<EOF
 {
   "log": { "loglevel": "warning", "access": "none" },
   "inbounds": [
     {
-      "tag": "reality-in",
+      "tag": "$tag",
       "port": $port,
       "protocol": "vless",
       "settings": {
@@ -236,13 +289,6 @@ $(clients_json)
       },
       "streamSettings": {
         $stream
-        "security": "reality",
-        "realitySettings": {
-          "target": "$sni:443",
-          "serverNames": ["$sni"],
-          "privateKey": "$priv",
-          "shortIds": ["$sid"]
-        }
       },
       "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": true }
     }
@@ -374,6 +420,8 @@ cmd_install() {
 		load_state
 		port=${port:-$PORT} sni=${sni:-$SNI} transport=${transport:-$TRANSPORT} address=${address:-$ADDRESS}
 		priv=$PRIVATE_KEY pub=$PUBLIC_KEY sid=$SHORT_ID xpath=$XHTTP_PATH
+		# install always means REALITY; the cdn name stays saved for a later "cdn"
+		domain=$DOMAIN cdn_address=$CDN_ADDRESS
 	fi
 	port=${port:-443} transport=${transport:-xhttp}
 	[ -n "$sni" ] || die "--sni is required (pick one with: bash install.sh check DOMAIN)"
@@ -433,23 +481,40 @@ cmd_install() {
 }
 
 link_for() {
-	local name=$1 id=$2 q
-	q="encryption=none&security=reality&sni=$SNI&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORT_ID"
-	if [ "$TRANSPORT" = vision ]; then
-		q+="&type=tcp&flow=xtls-rprx-vision"
+	local name=$1 id=$2 q addr=$ADDRESS
+	if [ "$SECURITY" = tls ]; then
+		addr=${CDN_ADDRESS:-$DOMAIN}
+		q="encryption=none&security=tls&sni=$DOMAIN&fp=chrome&type=xhttp&host=$DOMAIN"
+		q+="&path=$(urlenc "$XHTTP_PATH")&mode=packet-up"
 	else
-		q+="&type=xhttp&path=$(urlenc "$XHTTP_PATH")&mode=auto"
+		q="encryption=none&security=reality&sni=$SNI&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORT_ID"
+		if [ "$TRANSPORT" = vision ]; then
+			q+="&type=tcp&flow=xtls-rprx-vision"
+		else
+			q+="&type=xhttp&path=$(urlenc "$XHTTP_PATH")&mode=auto"
+		fi
 	fi
-	printf 'vless://%s@%s:%s?%s#%s\n' "$id" "$ADDRESS" "$PORT" "$q" "$(urlenc "$name")"
+	printf 'vless://%s@%s:%s?%s#%s\n' "$id" "$addr" "$PORT" "$q" "$(urlenc "$name")"
 }
 
 client_json() {
-	local id=$1 stream flow=
+	local id=$1 stream flow='' addr=$ADDRESS sec
 	if [ "$TRANSPORT" = vision ]; then
 		stream='"network": "raw",'
 		flow=', "flow": "xtls-rprx-vision"'
+	elif [ "$SECURITY" = tls ]; then
+		stream="\"network\": \"xhttp\", \"xhttpSettings\": { \"path\": \"$XHTTP_PATH\", \"mode\": \"packet-up\", \"host\": \"$DOMAIN\" },"
 	else
 		stream="\"network\": \"xhttp\", \"xhttpSettings\": { \"path\": \"$XHTTP_PATH\", \"mode\": \"auto\" },"
+	fi
+	if [ "$SECURITY" = tls ]; then
+		addr=${CDN_ADDRESS:-$DOMAIN}
+		sec="\"security\": \"tls\",
+      \"tlsSettings\": { \"serverName\": \"$DOMAIN\", \"fingerprint\": \"chrome\" }"
+	else
+		sec="\"security\": \"reality\",
+      \"realitySettings\": { \"serverName\": \"$SNI\", \"fingerprint\": \"chrome\",
+        \"password\": \"$PUBLIC_KEY\", \"shortId\": \"$SHORT_ID\" }"
 	fi
 	cat <<EOF
 {
@@ -457,13 +522,11 @@ client_json() {
   "inbounds": [{ "listen": "127.0.0.1", "port": 10808, "protocol": "socks", "settings": { "udp": true } }],
   "outbounds": [{
     "protocol": "vless",
-    "settings": { "vnext": [{ "address": "$ADDRESS", "port": $PORT,
+    "settings": { "vnext": [{ "address": "$addr", "port": $PORT,
       "users": [{ "id": "$id", "encryption": "none"$flow }] }] },
     "streamSettings": {
       $stream
-      "security": "reality",
-      "realitySettings": { "serverName": "$SNI", "fingerprint": "chrome",
-        "password": "$PUBLIC_KEY", "shortId": "$SHORT_ID" }
+      $sec
     }
   }]
 }
@@ -499,7 +562,7 @@ cmd_add() {
 	valid_name "$name"
 	grep -q "^$name " "$USERS" && die "$name already exists"
 	printf '%s %s\n' "$name" "$("$BIN" uuid)" >>"$USERS"
-	port=$PORT sni=$SNI transport=$TRANSPORT priv=$PRIVATE_KEY xpath=$XHTTP_PATH sid=$SHORT_ID
+	use_state
 	write_config
 	restart_xray
 	link_for "$name" "$(awk -v n="$name" '$1 == n { print $2 }' "$USERS")"
@@ -513,10 +576,90 @@ cmd_del() {
 	grep -q "^$name " "$USERS" || die "no user named $name"
 	[ "$(grep -c . "$USERS")" -gt 1 ] || die "$name is the last user; uninstall instead"
 	sed -i "/^$name /d" "$USERS"
-	port=$PORT sni=$SNI transport=$TRANSPORT priv=$PRIVATE_KEY xpath=$XHTTP_PATH sid=$SHORT_ID
+	use_state
 	write_config
 	restart_xray
 	echo "removed $name (its link stops working now)"
+}
+
+# Moves the server behind Cloudflare. REALITY can't survive a CDN (the CDN ends TLS itself),
+# so the inbound switches to TLS with Cloudflare's origin certificate; XHTTP stays, in packet-up
+# mode. It only writes and tests the config: restart when the DNS record and links are ready.
+cmd_cdn() {
+	need_root
+	local flag_addr=$address
+	load_state
+	use_state
+	local name=${1,,} old=$security end
+	[ "$transport" = xhttp ] || die "a CDN can't carry raw TCP (Vision); reinstall without --vision first"
+	if [ $undo -eq 1 ]; then
+		[ "$old" = tls ] || die "already on REALITY"
+		security=reality
+		write_config
+		save_state
+		printf 'security  tls -> reality (sni %s, same keys)\n' "$sni"
+		printf 'next      sudo systemctl restart xray\n'
+		printf 'link      sudo bash install.sh show\n'
+		return
+	fi
+	[ -n "$name" ] || die "usage: install.sh cdn DOMAIN (your orange-cloud name)"
+	[[ $name =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] || die "not a domain name: $name"
+	[[ " $CF_PORTS " == *" $port "* ]] || [ $force -eq 1 ] ||
+		die "Cloudflare doesn't proxy port $port; reinstall with --port 443 (or: $CF_PORTS), or use --force"
+	[ -z "$flag_addr" ] || [[ $flag_addr =~ ^[A-Za-z0-9.:-]+$ ]] || die "bad --address: $flag_addr"
+	[ -f "$cert" ] || die "no certificate at $cert (Cloudflare: SSL/TLS > Origin Server > Create Certificate)"
+	[ -f "$key" ] || die "no private key at $key"
+	openssl x509 -in "$cert" -noout 2>/dev/null || die "$cert is not a PEM certificate"
+	[ "$(openssl x509 -in "$cert" -noout -pubkey 2>/dev/null)" = "$(openssl pkey -in "$key" -pubout 2>/dev/null)" ] ||
+		die "$key is not the private key of $cert"
+	openssl x509 -in "$cert" -noout -checkhost "$name" 2>/dev/null | grep -q 'does match' ||
+		die "$cert is not valid for $name"
+	openssl x509 -in "$cert" -noout -checkend 86400 >/dev/null || die "$cert has expired"
+	end=$(openssl x509 -in "$cert" -noout -enddate | cut -d= -f2)
+	end=$(date -u -d "$end" +%F 2>/dev/null || echo "$end")
+
+	install -m 640 -o root -g xray "$cert" "$CDN_CERT"
+	install -m 640 -o root -g xray "$key" "$CDN_KEY"
+	security=tls domain=$name cdn_address=$flag_addr
+	write_config
+	save_state
+	printf 'cert      %s, valid for %s until %s\n' "${cert##*/}" "$name" "$end"
+	if [ "$old" = tls ]; then
+		printf 'security  tls (already), certificate replaced\n'
+	else
+		printf 'security  reality -> tls\n'
+		printf 'xhttp     mode auto -> packet-up; path and users unchanged\n'
+	fi
+	printf 'config    %s, xray -test ok\n' "$CONF"
+	printf 'next      sudo systemctl restart xray\n'
+	printf 'link      sudo bash install.sh show\n'
+}
+
+# A proxied (orange cloud) record answers with Cloudflare's addresses; a DNS only (grey) one
+# answers with the server's own address, which is the one thing a block list needs.
+check_cdn() {
+	local name=$1 ips me
+	ips=$(getent ahosts "$name" 2>/dev/null | awk '{ print $1 }' | sort -u | tr '\n' ' ') || true
+	printf '%s\n' "$name"
+	if [ -z "$ips" ]; then
+		printf '  dns        no address for this name yet\n'
+		printf '  verdict    add the record (proxied) and try again\n'
+		return 1
+	fi
+	printf '  resolves   %s\n' "${ips% }"
+	if [ -r "$STATE" ]; then
+		load_state
+		me=$ADDRESS
+	else
+		me=$(public_ip)
+	fi
+	if [[ " $ips" == *" $me "* ]]; then
+		printf '  server     %s (in the answer)\n' "$me"
+		printf '  verdict    DNS only (grey cloud): this name shows your server address\n'
+		return 1
+	fi
+	printf '  server     %s (not in the answer)\n' "$me"
+	printf '  verdict    good, the name points at the CDN\n'
 }
 
 cmd_uninstall() {
@@ -533,7 +676,7 @@ cmd_uninstall() {
 
 cmd=install
 case ${1:-} in
-install | check | show | add | del | users | uninstall) cmd=$1; shift ;;
+install | check | cdn | check-cdn | show | add | del | users | uninstall) cmd=$1; shift ;;
 esac
 args=()
 while [ $# -gt 0 ]; do
@@ -549,6 +692,9 @@ while [ $# -gt 0 ]; do
 	--force) force=1 ;;
 	--qr) qr=1 ;;
 	--json) json=1 ;;
+	--cert) cert=${2:?--cert needs a file}; shift ;;
+	--key) key=${2:?--key needs a file}; shift ;;
+	--undo) undo=1 ;;
 	-h | --help) usage; exit 0 ;;
 	--version) echo "$VERSION"; exit 0 ;;
 	-*) die "unknown option: $1 (see --help)" ;;
@@ -561,6 +707,8 @@ sni=${sni,,}
 case $cmd in
 install) cmd_install ;;
 check) [ -n "${args[0]:-}" ] || die "usage: install.sh check DOMAIN"; check_sni "${args[0],,}" ;;
+cdn) cmd_cdn "${args[0]:-}" ;;
+check-cdn) [ -n "${args[0]:-}" ] || die "usage: install.sh check-cdn DOMAIN"; check_cdn "${args[0],,}" ;;
 show) cmd_show "${args[0]:-}" ;;
 add) cmd_add "${args[0]:-}" ;;
 del) cmd_del "${args[0]:-}" ;;

@@ -3,7 +3,7 @@
 نصب Xray با VLESS + XHTTP + REALITY روی سرور شخصی، با یه دستور.
 English version: [below](#english)
 
-آموزش ویدیویی (فارسی): کانال یوتیوب [@V7lthronyx](https://www.youtube.com/@V7lthronyx)، اینترنت آزاد فصل ۲، قسمت ۱.
+آموزش ویدیویی (فارسی): کانال یوتیوب [@V7lthronyx](https://www.youtube.com/@V7lthronyx)، اینترنت آزاد فصل ۲: قسمت ۱ (نصب)، قسمت ۲ (پشت کلودفلر).
 
 ## چی کار می‌کنه
 
@@ -53,6 +53,9 @@ done. your link: sudo bash install.sh show
 |---|---|
 | `bash install.sh check DOMAIN` | تست یه دامنه برای REALITY (root لازم نداره) |
 | `sudo bash install.sh --sni DOMAIN` | نصب، یا آپدیت اگه قبلاً نصب شده |
+| `sudo bash install.sh cdn DOMAIN` | بردن سرور پشت کلودفلر (پایین‌تر توضیح دادم) |
+| `sudo bash install.sh cdn --undo` | برگشت به REALITY با همون کلیدهای قبلی |
+| `sudo bash install.sh check-cdn DOMAIN` | آیا دامنه به کلودفلر اشاره می‌کنه یا آی‌پی سرورت رو لو میده؟ |
 | `sudo bash install.sh show [NAME] [--qr]` | لینک کاربرها، با `--qr` کد QR توی ترمینال |
 | `sudo bash install.sh show NAME --json` | کانفیگ JSON کلاینت Xray (SOCKS روی 127.0.0.1:10808) |
 | `sudo bash install.sh add NAME` | کاربر جدید با UUID جدا |
@@ -82,6 +85,46 @@ done. your link: sudo bash install.sh show
 
 برای پیدا کردن کاندید نزدیک، ابزار رسمی XTLS هست: [RealiTLScanner](https://github.com/XTLS/RealiTLScanner). فقط آروم و روی رنج آی‌پی خود سرورت اجراش کن.
 
+## پشت کلودفلر (وقتی آی‌پی سرور بسته شد)
+
+اگه آی‌پی سرورت مسدود شد، لازم نیست سرور عوض کنی: سرور رو پشت کلودفلر ببر. فیلترینگ فقط آی‌پی‌های مشترک کلودفلر رو می‌بینه و کلودفلر پشت صحنه به سرورت وصل میشه.
+
+REALITY پشت CDN کار نمی‌کنه، چون کلودفلر TLS رو خودش باز می‌کنه ([Xray-core #1944](https://github.com/XTLS/Xray-core/discussions/1944)). برای همین `cdn` امنیت رو از REALITY به TLS با گواهی Origin کلودفلر عوض می‌کنه و XHTTP رو روی حالت `packet-up` می‌ذاره که با CDNها سازگارترین حالته ([XHTTP: Beyond REALITY](https://github.com/XTLS/Xray-core/discussions/4113)). UUIDها، path و کاربرها عوض نمیشن.
+
+۱. یه دامنه رو به حساب رایگان کلودفلر اضافه کن.
+۲. توی DNS یه رکورد `A` بساز، مثلاً `sub.example.com`، به آی‌پی سرورت. ابر نارنجی (Proxied) باید روشن باشه.
+۳. توی SSL/TLS حالت رو بذار روی **Full (strict)**.
+۴. توی SSL/TLS > Origin Server > Create Certificate یه گواهی بساز. متن Origin Certificate رو توی `origin.pem` و Private key رو توی `origin.key` کنار اسکریپت ذخیره کن.
+۵. روی سرور:
+
+```bash
+sudo bash install.sh cdn sub.example.com
+sudo systemctl restart xray
+sudo bash install.sh show
+sudo bash install.sh check-cdn sub.example.com
+```
+
+خروجی `cdn` این شکلیه:
+
+```
+cert      origin.pem, valid for sub.example.com until 2041-10-20
+security  reality -> tls
+xhttp     mode auto -> packet-up; path and users unchanged
+config    /usr/local/etc/xray/config.json, xray -test ok
+next      sudo systemctl restart xray
+link      sudo bash install.sh show
+```
+
+`cdn` فقط کانفیگ رو می‌نویسه و تست می‌کنه. تا وقتی `systemctl restart xray` رو نزنی، لینک‌های REALITY قبلی کار می‌کنن؛ پس اول رکورد DNS و لینک‌های جدید رو آماده کن، بعد ری‌استارت کن.
+
+نکته‌ها:
+
+- پورت سرور باید یکی از پورت‌های HTTPS کلودفلر باشه: 443، 2053، 2083، 2087، 2096 یا 8443 ([مستند کلودفلر](https://developers.cloudflare.com/fundamentals/reference/network-ports/)).
+- اگه آی‌پی‌های پیش‌فرض کلودفلر کند یا بسته‌ان، با `--address` یه آی‌پی تمیز کلودفلر رو توی لینک بذار؛ اسم دامنه توی `sni` و `host` می‌مونه.
+- `check-cdn` باید `good` بده. اگه آی‌پی سرورت رو توی جواب دید، ابر نارنجی خاموشه. هیچ رکورد دیگه‌ای هم با ابر خاکستری روی آی‌پی سرورت نذار.
+- کلودفلر اتصالی رو که ۱۰۰ ثانیه هیچ داده‌ای نفرسته می‌بنده. برای اتصال‌های بی‌کار مثل SSH داخل تونل، keepalive رو روشن کن.
+- کلودفلر TLS رو باز می‌کنه و می‌تونه ببینه به چه آدرس‌هایی وصل میشی. محتوای سایت‌های HTTPS همچنان رمز شده می‌مونه.
+
 ## کلاینت‌ها
 
 - اندروید: v2rayNG (دکمه‌ی + و Import config from Clipboard)
@@ -100,6 +143,7 @@ done. your link: sudo bash install.sh show
 | `/usr/local/etc/xray/config.json` | کانفیگ سرور (root:xray، 640) |
 | `/usr/local/etc/xray/xhttp-reality.env` | پورت، SNI، کلیدها (فقط root) |
 | `/usr/local/etc/xray/users` | اسم و UUID کاربرها (فقط root) |
+| `/usr/local/etc/xray/cdn.crt`، `cdn.key` | گواهی Origin کلودفلر، فقط بعد از `cdn` (root:xray، 640) |
 | `/etc/systemd/system/xray.service` | سرویس |
 | `/etc/sysctl.d/90-bbr.conf` | فقط اگه BBR از قبل روشن نبوده |
 
@@ -110,7 +154,8 @@ done. your link: sudo bash install.sh show
 - **تایم‌اوت:** پورت جایی بسته‌ست. فایروال پنل ارائه‌دهنده رو چک کن (توی اوراکل: Security List).
 - **وصل میشه ولی اینترنت نداره:** `pbk`، `sid` یا `sni` با سرور نمی‌خونه. لینک رو دوباره از `show` بگیر.
 - **اپ لینک رو نمی‌شناسه:** اپ رو آپدیت کن یا `--vision`.
-- **چند روز کار کرد و بعد قطع شد:** احتمالاً آی‌پی مسدود شده. آی‌پی جدید و SNI دیگه، یا قسمت بعدی آموزش (XHTTP پشت CDN).
+- **چند روز کار کرد و بعد قطع شد:** احتمالاً آی‌پی مسدود شده. سرور رو با `cdn` پشت کلودفلر ببر (بالاتر توضیح دادم).
+- **پشت کلودفلر وصل نمیشه:** ابر نارنجی روشن باشه، SSL/TLS روی Full (strict) باشه نه Flexible، و `path` لینک با سرور یکی باشه. بعد یه آی‌پی تمیز دیگه با `--address` امتحان کن.
 - **`xray did not start`:** خروجی `journalctl -u xray -n 50` رو ببین.
 
 ## مجوز
@@ -143,6 +188,17 @@ What it does:
 - enables BBR when the kernel has it
 
 Re-running it updates Xray and keeps keys, users and links. `add NAME` / `del NAME` manage users, `show NAME --qr` prints a QR code, `show NAME --json` prints an Xray client config, `uninstall` removes everything except ufw rules.
+
+Behind Cloudflare, when the server IP gets blocked: REALITY can't work behind a CDN, so `cdn` switches the inbound to TLS with a Cloudflare origin certificate and XHTTP `packet-up` mode, keeping UUIDs, path and users. Add a proxied (orange cloud) `A` record for a subdomain, set SSL/TLS to Full (strict), save the origin certificate and key as `origin.pem` / `origin.key`, then:
+
+```bash
+sudo bash install.sh cdn sub.example.com     # writes and tests the config only
+sudo systemctl restart xray                  # when the DNS record and the new links are ready
+sudo bash install.sh show
+sudo bash install.sh check-cdn sub.example.com
+```
+
+The port must be a Cloudflare HTTPS port (443, 2053, 2083, 2087, 2096, 8443). `--address IP` puts a clean Cloudflare IP in the links, `cdn --undo` goes back to REALITY with the old keys.
 
 Clients that understand XHTTP: v2rayNG and v2rayN (Xray core), Hiddify 4.0.5+. For older apps install with `--vision`.
 
