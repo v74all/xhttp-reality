@@ -61,6 +61,7 @@ done. your link: sudo bash install.sh show
 | `sudo bash install.sh add NAME` | کاربر جدید با UUID جدا |
 | `sudo bash install.sh del NAME` | حذف کاربر (لینکش همون لحظه از کار میفته) |
 | `sudo bash install.sh users` | لیست کاربرها |
+| `sudo bash install.sh audit` | چک کردن سرور خودت برای چیزهایی که زودتر لوش میدن (فقط می‌خونه، چیزی رو عوض نمی‌کنه) |
 | `sudo bash install.sh uninstall` | حذف کامل |
 
 گزینه‌های نصب:
@@ -125,6 +126,21 @@ link      sudo bash install.sh show
 - کلودفلر اتصالی رو که ۱۰۰ ثانیه هیچ داده‌ای نفرسته می‌بنده. برای اتصال‌های بی‌کار مثل SSH داخل تونل، keepalive رو روشن کن.
 - کلودفلر TLS رو باز می‌کنه و می‌تونه ببینه به چه آدرس‌هایی وصل میشی. محتوای سایت‌های HTTPS همچنان رمز شده می‌مونه.
 
+## چک کردن سرور (audit)
+
+`sudo bash install.sh audit` فقط روی سرور خودت اجرا میشه، چیزی رو عوض نمی‌کنه و برای هر مورد یه خط `ok` یا `warn` میده:
+
+| خط | چی رو چک می‌کنه |
+|---|---|
+| `sni` یا `cdn` | سایتی که REALITY ازش قرض می‌گیره (TLS 1.3، HTTP/2، فاصله)، یا اینکه دامنه‌ی پشت کلودفلر آی‌پی سرور رو لو نده |
+| `ssh` | ورود با رمز یا ورود root روشنه؟ |
+| `ports` | پورت‌های دیگه‌ای که روی آی‌پی عمومی بازن (مثلاً پنل)، و فایروال |
+| `users` | تعداد لینک‌ها روی یه سرور؛ بیشتر از ۵ تا هشدار میده |
+| `cover` | وقتی کسی بدون کلید به سرور سر بزنه چی می‌بینه |
+| `backup` | پروتکل دوم (Hysteria2 یا AmneziaWG) کنار Xray هست یا نه |
+
+اگه چیزی `warn` باشه، خروجی دستور ۱ میشه.
+
 ## کلاینت‌ها
 
 - اندروید: v2rayNG (دکمه‌ی + و Import config from Clipboard)
@@ -186,6 +202,8 @@ What it does:
 - refuses private/link-local destinations, BitTorrent and Iranian destinations (`geosite:category-ir`, `geoip:ir`, `*.ir`) on the server side
 - `--firewall` turns ufw on with only SSH and the Xray port open; on Oracle Cloud Ubuntu images it also opens the port in iptables
 - enables BBR when the kernel has it
+
+`sudo bash install.sh audit` (1.2.0) is read-only: one `ok`/`warn` line each for the REALITY target or the CDN name, SSH password/root login, other ports open on the public address plus the firewall, the number of links on the server (more than 5 warns), what an unauthenticated probe gets back, and whether a second transport (Hysteria2 / AmneziaWG) runs next to Xray. It exits 1 when something is worth fixing.
 
 Re-running it updates Xray and keeps keys, users and links. `add NAME` / `del NAME` manage users, `show NAME --qr` prints a QR code, `show NAME --json` prints an Xray client config, `uninstall` removes everything except ufw rules.
 

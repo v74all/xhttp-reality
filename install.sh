@@ -8,7 +8,7 @@
 set -euo pipefail
 umask 077
 
-VERSION=1.1.0
+VERSION=1.2.0
 
 BIN=/usr/local/bin/xray
 ASSETS=/usr/local/share/xray
@@ -50,6 +50,7 @@ usage: bash install.sh [install] --sni DOMAIN [options]
        bash install.sh cdn DOMAIN [--cert FILE] [--key FILE] [--address IP] | cdn --undo
        bash install.sh check-cdn DOMAIN
        bash install.sh show [NAME] [--qr|--json]
+       bash install.sh audit
        bash install.sh add NAME | del NAME | users
        bash install.sh uninstall
 
@@ -71,6 +72,9 @@ cdn (server behind Cloudflare; REALITY can't work behind a CDN, so it switches t
   --address IP       put a clean Cloudflare IP in links instead of DOMAIN
   --undo             back to REALITY with the old keys
   it writes and tests the config; restart xray when your DNS record and links are ready
+
+audit (read only): sni or cdn name, ssh logins, open ports + firewall, number of links,
+  what a probe sees, a backup transport; exits 1 when something is worth fixing
 EOF
 }
 
@@ -359,6 +363,8 @@ EOF
 restart_xray() {
 	systemctl daemon-reload
 	systemctl enable xray >/dev/null 2>&1
+	# several add/del in a row hit systemd's start limit (5 starts in 10 s) and left xray stopped
+	systemctl reset-failed xray >/dev/null 2>&1 || true
 	systemctl restart xray
 	sleep 1
 	systemctl is-active --quiet xray || {
@@ -662,6 +668,105 @@ check_cdn() {
 	printf '  verdict    good, the name points at the CDN\n'
 }
 
+# --- audit ------------------------------------------------------------------
+
+# Read-only. One line per thing that gets a proxy server found or blocked early.
+# Exit code 1 when anything is worth fixing.
+cmd_audit() {
+	need_root
+	load_state
+	local warn=0 out v ms pw root extra='' p a fw=none open code units=''
+	line() { printf '  %-5s %-7s %s\n' "$1" "$2" "$3"; [ "$1" = ok ] || warn=1; }
+
+	printf 'xhttp-reality %s audit: %s, %s\n' "$VERSION" "$ADDRESS" "$SECURITY"
+
+	# 1. the name probes and DPI compare with the server
+	if [ "$SECURITY" = reality ]; then
+		out=$(check_sni "$SNI" 2>&1) || true
+		v=$(awk '/verdict/ { $1 = ""; sub(/^ +/, ""); print }' <<<"$out")
+		ms=$(awk '/handshake/ { print $2 }' <<<"$out")
+		case $v in
+		good) line ok sni "$SNI, tls 1.3 + h2, ${ms} ms away" ;;
+		usable*) line warn sni "$SNI is ${ms} ms away: pick a closer one" ;;
+		*) line warn sni "$SNI: $v" ;;
+		esac
+	else
+		if out=$(check_cdn "$DOMAIN" 2>&1); then
+			line ok cdn "$DOMAIN hides this server"
+		else
+			line warn cdn "$DOMAIN: $(awk '/verdict/ { $1 = ""; sub(/^ +/, ""); print }' <<<"$out")"
+		fi
+	fi
+
+	# 2. password logins are what scanners try first
+	pw=$(sshd -T 2>/dev/null | awk '$1 == "passwordauthentication" { print $2 }')
+	root=$(sshd -T 2>/dev/null | awk '$1 == "permitrootlogin" { print $2 }')
+	if [ "$pw" = yes ]; then
+		line warn ssh "password login is on: keys only"
+	elif [ "$root" = yes ]; then
+		line warn ssh "root can log in: PermitRootLogin no"
+	else
+		line ok ssh "keys only"
+	fi
+
+	# 3. anything else listening on a public address is one more fingerprint
+	while read -r a; do
+		p=${a##*:}
+		case $a in 127.* | \[::1\]:* | ::1:*) continue ;; esac
+		[ "$p" = "$PORT" ] && continue
+		grep -qx "$p" <<<"$(ssh_ports)" && continue
+		[[ " $extra " == *" $p "* ]] || extra+=" $p"
+	done < <(ss -tlnH 2>/dev/null | awk '{ print $4 }')
+	if have ufw && ufw status 2>/dev/null | grep -q '^Status: active'; then
+		fw=ufw
+	elif have nft && nft list ruleset 2>/dev/null | grep -q 'hook input'; then
+		fw=nftables
+	fi
+	open=$extra
+	if [ "$fw" = ufw ] && [ -n "$extra" ]; then
+		open=''
+		for p in $extra; do
+			ufw status 2>/dev/null | grep -Eq "^$p(/tcp)?[[:space:]]+ALLOW" && open+=" $p"
+		done
+	fi
+	if [ -n "$open" ]; then
+		line warn ports "open to all:$open (firewall: $fw)"
+	elif [ "$fw" = none ]; then
+		line warn ports "only $PORT + ssh, but no firewall"
+	else
+		line ok ports "only $PORT + ssh ($fw)"
+	fi
+
+	# 4. every extra person on one address is more traffic and more chances the link leaks
+	v=$(wc -l <"$USERS")
+	if [ "$v" -gt 5 ]; then
+		line warn users "$v links on one server: share less"
+	else
+		line ok users "$v links"
+	fi
+
+	# 5. what a probe gets back
+	if [ "$SECURITY" = reality ]; then
+		line ok cover "probes get $SNI's real site"
+	else
+		code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "https://$DOMAIN/" 2>/dev/null) || true
+		case $code in
+		2??) line ok cover "$DOMAIN/ serves a page ($code)" ;;
+		*) line warn cover "$DOMAIN/ answers $code: put a real site there" ;;
+		esac
+	fi
+
+	# 6. one blocked address shouldn't mean no way in
+	systemctl is-active --quiet hysteria-server 2>/dev/null && units+=" hysteria2"
+	systemctl is-active --quiet awg-quick@awg0 2>/dev/null && units+=" amneziawg"
+	if [ -n "$units" ]; then
+		line ok backup "${units# } next to xray"
+	else
+		line warn backup "none: one block and nobody gets in"
+	fi
+	return $warn
+}
+
 cmd_uninstall() {
 	need_root
 	systemctl disable --now xray >/dev/null 2>&1 || true
@@ -676,7 +781,8 @@ cmd_uninstall() {
 
 cmd=install
 case ${1:-} in
-install | check | cdn | check-cdn | show | add | del | users | uninstall) cmd=$1; shift ;;
+install | check | cdn | check-cdn | show | add | del | users | audit | uninstall) cmd=$1; shift ;;
+help) usage; exit 0 ;;
 esac
 args=()
 while [ $# -gt 0 ]; do
@@ -705,7 +811,7 @@ done
 sni=${sni,,}
 
 case $cmd in
-install) cmd_install ;;
+install) [ ${#args[@]} -eq 0 ] || die "unknown command: ${args[0]} (see --help)"; cmd_install ;;
 check) [ -n "${args[0]:-}" ] || die "usage: install.sh check DOMAIN"; check_sni "${args[0],,}" ;;
 cdn) cmd_cdn "${args[0]:-}" ;;
 check-cdn) [ -n "${args[0]:-}" ] || die "usage: install.sh check-cdn DOMAIN"; check_cdn "${args[0],,}" ;;
@@ -713,5 +819,6 @@ show) cmd_show "${args[0]:-}" ;;
 add) cmd_add "${args[0]:-}" ;;
 del) cmd_del "${args[0]:-}" ;;
 users) need_root; load_state; awk '{ print $1 }' "$USERS" ;;
+audit) cmd_audit ;;
 uninstall) cmd_uninstall ;;
 esac
