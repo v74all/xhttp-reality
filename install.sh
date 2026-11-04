@@ -8,7 +8,7 @@
 set -euo pipefail
 umask 077
 
-VERSION=1.2.0
+VERSION=1.3.0
 
 BIN=/usr/local/bin/xray
 ASSETS=/usr/local/share/xray
@@ -40,6 +40,12 @@ cdn_address=
 cert=./origin.pem
 key=./origin.key
 undo=0
+mldsa=0
+pqdec=
+pqenc=
+pqseed=
+pqverify=
+PQ_MIN_CHAIN=3500
 
 usage() {
 	cat <<EOF
@@ -50,6 +56,7 @@ usage: bash install.sh [install] --sni DOMAIN [options]
        bash install.sh cdn DOMAIN [--cert FILE] [--key FILE] [--address IP] | cdn --undo
        bash install.sh check-cdn DOMAIN
        bash install.sh show [NAME] [--qr|--json]
+       bash install.sh pq [--mldsa] [--force] | pq --undo
        bash install.sh audit
        bash install.sh add NAME | del NAME | users
        bash install.sh uninstall
@@ -72,6 +79,12 @@ cdn (server behind Cloudflare; REALITY can't work behind a CDN, so it switches t
   --address IP       put a clean Cloudflare IP in links instead of DOMAIN
   --undo             back to REALITY with the old keys
   it writes and tests the config; restart xray when your DNS record and links are ready
+
+pq (post-quantum layers on top of the running REALITY server):
+  default            VLESS Encryption: ML-KEM-768 + X25519 hybrid key exchange inside the tunnel
+  --mldsa            also REALITY ML-DSA-65 (the borrowed site's certificate chain must be over 3500 bytes)
+  --undo             back to plain VLESS (encryption none)
+  every link changes: old links stop working until people get the new ones (use show --json for apps)
 
 audit (read only): sni or cdn name, ssh logins, open ports + firewall, number of links,
   what a probe sees, a backup transport; exits 1 when something is worth fixing
@@ -173,6 +186,7 @@ load_state() {
 	. "$STATE"
 	# state files from 1.0.0 have no cdn lines
 	SECURITY=${SECURITY:-reality} DOMAIN=${DOMAIN:-} CDN_ADDRESS=${CDN_ADDRESS:-}
+	PQ_DEC=${PQ_DEC:-} PQ_ENC=${PQ_ENC:-} PQ_SEED=${PQ_SEED:-} PQ_VERIFY=${PQ_VERIFY:-}
 }
 
 # the lowercase variables write_config and save_state use, from the saved state
@@ -180,6 +194,7 @@ use_state() {
 	# shellcheck disable=SC2153 # PORT, TRANSPORT, ADDRESS come from the state file
 	port=$PORT sni=$SNI transport=$TRANSPORT address=$ADDRESS priv=$PRIVATE_KEY pub=$PUBLIC_KEY
 	sid=$SHORT_ID xpath=$XHTTP_PATH security=$SECURITY domain=$DOMAIN cdn_address=$CDN_ADDRESS
+	pqdec=$PQ_DEC pqenc=$PQ_ENC pqseed=$PQ_SEED pqverify=$PQ_VERIFY
 }
 
 save_state() {
@@ -195,6 +210,10 @@ XHTTP_PATH=$xpath
 SECURITY=$security
 DOMAIN=$domain
 CDN_ADDRESS=$cdn_address
+PQ_DEC=$pqdec
+PQ_ENC=$pqenc
+PQ_SEED=$pqseed
+PQ_VERIFY=$pqverify
 EOF
 	chmod 600 "$STATE"
 }
@@ -274,7 +293,7 @@ write_config() {
           \"target\": \"$sni:443\",
           \"serverNames\": [\"$sni\"],
           \"privateKey\": \"$priv\",
-          \"shortIds\": [\"$sid\"]
+          \"shortIds\": [\"$sid\"]$(if [ -n "$pqseed" ]; then printf ',\n          \"mldsa65Seed\": \"%s\"' "$pqseed"; fi)
         }"
 	fi
 	cat >"$ETC/config.new.json" <<EOF
@@ -289,7 +308,7 @@ write_config() {
         "clients": [
 $(clients_json)
         ],
-        "decryption": "none"
+        "decryption": "${pqdec:-none}"
       },
       "streamSettings": {
         $stream
@@ -428,6 +447,7 @@ cmd_install() {
 		priv=$PRIVATE_KEY pub=$PUBLIC_KEY sid=$SHORT_ID xpath=$XHTTP_PATH
 		# install always means REALITY; the cdn name stays saved for a later "cdn"
 		domain=$DOMAIN cdn_address=$CDN_ADDRESS
+		pqdec=$PQ_DEC pqenc=$PQ_ENC pqseed=$PQ_SEED pqverify=$PQ_VERIFY
 	fi
 	port=${port:-443} transport=${transport:-xhttp}
 	[ -n "$sni" ] || die "--sni is required (pick one with: bash install.sh check DOMAIN)"
@@ -487,13 +507,14 @@ cmd_install() {
 }
 
 link_for() {
-	local name=$1 id=$2 q addr=$ADDRESS
+	local name=$1 id=$2 q addr=$ADDRESS enc=${PQ_ENC:-none}
 	if [ "$SECURITY" = tls ]; then
 		addr=${CDN_ADDRESS:-$DOMAIN}
-		q="encryption=none&security=tls&sni=$DOMAIN&fp=chrome&type=xhttp&host=$DOMAIN"
+		q="encryption=$enc&security=tls&sni=$DOMAIN&fp=chrome&type=xhttp&host=$DOMAIN"
 		q+="&path=$(urlenc "$XHTTP_PATH")&mode=packet-up"
 	else
-		q="encryption=none&security=reality&sni=$SNI&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORT_ID"
+		q="encryption=$enc&security=reality&sni=$SNI&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORT_ID"
+		[ -z "$PQ_VERIFY" ] || q+="&pqv=$PQ_VERIFY"
 		if [ "$TRANSPORT" = vision ]; then
 			q+="&type=tcp&flow=xtls-rprx-vision"
 		else
@@ -504,7 +525,8 @@ link_for() {
 }
 
 client_json() {
-	local id=$1 stream flow='' addr=$ADDRESS sec
+	local id=$1 stream flow='' addr=$ADDRESS sec dsa=''
+	[ -z "$PQ_VERIFY" ] || dsa=", \"mldsa65Verify\": \"$PQ_VERIFY\""
 	if [ "$TRANSPORT" = vision ]; then
 		stream='"network": "raw",'
 		flow=', "flow": "xtls-rprx-vision"'
@@ -520,7 +542,7 @@ client_json() {
 	else
 		sec="\"security\": \"reality\",
       \"realitySettings\": { \"serverName\": \"$SNI\", \"fingerprint\": \"chrome\",
-        \"password\": \"$PUBLIC_KEY\", \"shortId\": \"$SHORT_ID\" }"
+        \"password\": \"$PUBLIC_KEY\", \"shortId\": \"$SHORT_ID\"$dsa }"
 	fi
 	cat <<EOF
 {
@@ -529,7 +551,7 @@ client_json() {
   "outbounds": [{
     "protocol": "vless",
     "settings": { "vnext": [{ "address": "$addr", "port": $PORT,
-      "users": [{ "id": "$id", "encryption": "none"$flow }] }] },
+      "users": [{ "id": "$id", "encryption": "${PQ_ENC:-none}"$flow }] }] },
     "streamSettings": {
       $stream
       $sec
@@ -554,6 +576,7 @@ cmd_show() {
 		link_for "$n" "$id"
 		if [ $qr -eq 1 ]; then
 			have qrencode || die "qrencode is not installed"
+			[ "$(link_for "$n" "$id" | wc -c)" -le 2900 ] || die "this link is $(($(link_for "$n" "$id" | wc -c) - 1)) characters, too long for a QR code: use show --json or paste the link"
 			link_for "$n" "$id" | qrencode -t ANSIUTF8 -m 1
 		fi
 	done <"$USERS"
@@ -767,6 +790,60 @@ cmd_audit() {
 	return $warn
 }
 
+pqstep() { printf '[%s/4] %-8s %s\n' "$1" "$2" "$3"; }
+
+chain_bytes() {
+	{ "$BIN" tls ping "$1" 2>/dev/null || true; } | awk '/total length/ { n = $(NF - 3) } END { print n + 0 }'
+}
+
+pq_pick() {
+	awk -v key="$1" '/ML-KEM-768/ { f = 1 } f && $1 == "\"" key "\":" { gsub(/[",]/, "", $2); print $2; exit }' <<<"$2"
+}
+
+cmd_pq() {
+	need_root
+	load_state
+	use_state
+	[ "$SECURITY" = reality ] || die "post-quantum layers are set up on the REALITY server: run cdn --undo first"
+	if [ $undo -eq 1 ]; then
+		[ -n "$pqdec$pqseed" ] || die "post-quantum is not on"
+		pqdec='' pqenc='' pqseed='' pqverify=''
+		write_config
+		save_state
+		restart_xray
+		printf 'encryption  plain vless again\n'
+		printf 'links       old links work again: sudo bash install.sh show\n'
+		return
+	fi
+	"$BIN" help 2>/dev/null | grep vlessenc >/dev/null || die "this xray has no vlessenc: reinstall to get a newer release"
+	local out dec enc keys chain=0
+	out=$("$BIN" vlessenc)
+	dec=$(pq_pick decryption "$out")
+	enc=$(pq_pick encryption "$out")
+	[ -n "$dec" ] && [ -n "$enc" ] || die "can't read the keys from: xray vlessenc"
+	pqstep 1 xray "$("$BIN" version | awk 'NR == 1 { print "v" $2 }'), vlessenc ok"
+	pqdec=$dec pqenc=$enc pqseed='' pqverify=''
+	pqstep 2 keys "ML-KEM-768 + X25519, ticket 600 s, link part ${#enc} characters"
+	if [ $mldsa -eq 1 ]; then
+		chain=$(chain_bytes "$sni")
+		if [ "$chain" -le "$PQ_MIN_CHAIN" ] && [ $force -eq 0 ]; then
+			die "$sni sends a $chain byte certificate chain; ML-DSA-65 needs over $PQ_MIN_CHAIN (pick another sni, or --force)"
+		fi
+		keys=$("$BIN" mldsa65)
+		pqseed=$(awk -F': *' '/^Seed/ { print $2 }' <<<"$keys")
+		pqverify=$(awk -F': *' '/^Verify/ { print $2 }' <<<"$keys")
+		[ -n "$pqseed" ] && [ -n "$pqverify" ] || die "can't read the keys from: xray mldsa65"
+		pqstep 3 reality "ML-DSA-65 on, $sni chain $chain bytes, link part ${#pqverify} characters"
+	else
+		pqstep 3 reality "ML-DSA-65 off (--mldsa turns it on)"
+	fi
+	write_config
+	save_state
+	restart_xray
+	pqstep 4 service "xray.service active; every old link stopped working"
+	echo "done. new links: sudo bash install.sh show (apps that can't take a long link: show --json)"
+}
+
 cmd_uninstall() {
 	need_root
 	systemctl disable --now xray >/dev/null 2>&1 || true
@@ -781,7 +858,7 @@ cmd_uninstall() {
 
 cmd=install
 case ${1:-} in
-install | check | cdn | check-cdn | show | add | del | users | audit | uninstall) cmd=$1; shift ;;
+install | check | cdn | check-cdn | show | add | del | users | audit | pq | uninstall) cmd=$1; shift ;;
 help) usage; exit 0 ;;
 esac
 args=()
@@ -801,6 +878,7 @@ while [ $# -gt 0 ]; do
 	--cert) cert=${2:?--cert needs a file}; shift ;;
 	--key) key=${2:?--key needs a file}; shift ;;
 	--undo) undo=1 ;;
+	--mldsa) mldsa=1 ;;
 	-h | --help) usage; exit 0 ;;
 	--version) echo "$VERSION"; exit 0 ;;
 	-*) die "unknown option: $1 (see --help)" ;;
@@ -820,5 +898,6 @@ add) cmd_add "${args[0]:-}" ;;
 del) cmd_del "${args[0]:-}" ;;
 users) need_root; load_state; awk '{ print $1 }' "$USERS" ;;
 audit) cmd_audit ;;
+pq) cmd_pq ;;
 uninstall) cmd_uninstall ;;
 esac

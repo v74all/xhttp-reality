@@ -3,7 +3,7 @@
 نصب Xray با VLESS + XHTTP + REALITY روی سرور شخصی، با یه دستور.
 English version: [below](#english)
 
-آموزش ویدیویی (فارسی): کانال یوتیوب [@V7lthronyx](https://www.youtube.com/@V7lthronyx)، اینترنت آزاد فصل ۲: قسمت ۱ (نصب)، قسمت ۲ (پشت کلودفلر).
+آموزش ویدیویی (فارسی): کانال یوتیوب [@V7lthronyx](https://www.youtube.com/@V7lthronyx)، اینترنت آزاد فصل ۲: قسمت ۱ (نصب)، قسمت ۲ (پشت کلودفلر)، قسمت ۷ (`audit`)، قسمت ۱۰ (ضدکوانتوم).
 
 ## چی کار می‌کنه
 
@@ -62,6 +62,8 @@ done. your link: sudo bash install.sh show
 | `sudo bash install.sh del NAME` | حذف کاربر (لینکش همون لحظه از کار میفته) |
 | `sudo bash install.sh users` | لیست کاربرها |
 | `sudo bash install.sh audit` | چک کردن سرور خودت برای چیزهایی که زودتر لوش میدن (فقط می‌خونه، چیزی رو عوض نمی‌کنه) |
+| `sudo bash install.sh pq [--mldsa]` | اضافه کردن لایه‌ی ضدکوانتوم به سرور REALITY (پایین‌تر توضیح دادم) |
+| `sudo bash install.sh pq --undo` | برگشت به VLESS معمولی؛ لینک‌های قبلی دوباره کار می‌کنن |
 | `sudo bash install.sh uninstall` | حذف کامل |
 
 گزینه‌های نصب:
@@ -126,6 +128,39 @@ link      sudo bash install.sh show
 - کلودفلر اتصالی رو که ۱۰۰ ثانیه هیچ داده‌ای نفرسته می‌بنده. برای اتصال‌های بی‌کار مثل SSH داخل تونل، keepalive رو روشن کن.
 - کلودفلر TLS رو باز می‌کنه و می‌تونه ببینه به چه آدرس‌هایی وصل میشی. محتوای سایت‌های HTTPS همچنان رمز شده می‌مونه.
 
+## لایه‌ی ضدکوانتوم (pq)
+
+ترافیکی که امروز ضبط بشه رو میشه نگه داشت و اگه یه روز کامپیوتر کوانتومی به اندازه‌ی کافی قوی ساخته بشه، تبادل کلیدش رو شکست. به این میگن harvest now, decrypt later. `pq` برای همین خطره: یه لایه‌ی VLESS Encryption با تبادل کلید هیبرید ML-KEM-768 + X25519 داخل تونل اضافه می‌کنه ([Xray-core #5067](https://github.com/XTLS/Xray-core/pull/5067)).
+
+```bash
+sudo bash install.sh pq
+sudo bash install.sh show               # لینک‌های جدید
+sudo bash install.sh show main --json   # برای اپی که لینک بلند نمی‌گیره
+```
+
+خروجی `pq` این شکلیه:
+
+```text
+[1/4] xray     v26.10.21, vlessenc ok
+[2/4] keys     ML-KEM-768 + X25519, ticket 600 s, link part 1610 characters
+[3/4] reality  ML-DSA-65 off (--mldsa turns it on)
+[4/4] service  xray.service active; every old link stopped working
+done. new links: sudo bash install.sh show (apps that can't take a long link: show --json)
+```
+
+چیزهایی که باید بدونی:
+
+- سرعت رو بیشتر نمی‌کنه و فیلترینگ امروز رو بهتر رد نمی‌کنه. فقط برای اینه که ترافیک ضبط‌شده بعداً باز نشه.
+- همه‌ی لینک‌ها عوض میشن و لینک‌های قبلی همون لحظه از کار میفتن. `add` و نصب دوباره لایه رو نگه می‌دارن.
+- لینک بلند میشه: حدود ۱۸۰۰ کاراکتر، و با `--mldsa` حدود ۴۵۰۰ کاراکتر. `show --qr` لینک بالای ۲۹۰۰ کاراکتر رو قبول نمی‌کنه؛ از `show NAME --json` استفاده کن.
+- کلاینت باید هسته‌ی جدید Xray داشته باشه (تست‌شده با Xray 26.10.21). خروجی `--json` کانفیگ Xray هست. sing-box تا نسخه‌ی 1.14.4 نه XHTTP داره نه VLESS Encryption، پس به این سرور وصل نمیشه.
+- `pq` فقط روی حالت REALITY اجرا میشه. سرور پشت کلودفلر باشه، اول `cdn --undo`.
+- اگه خطای `this xray has no vlessenc` گرفتی، `sudo bash install.sh` رو دوباره بزن تا Xray آپدیت بشه؛ کلیدها و لینک‌ها عوض نمیشن.
+
+`--mldsa` امضای ML-DSA-65 رو هم به REALITY اضافه می‌کنه ([Xray-core #4915](https://github.com/XTLS/Xray-core/pull/4915)). این یکی جلوی جعل سرور در آینده رو می‌گیره و برای ترافیکی که قبلاً ضبط شده کاری نمی‌کنه. سایت قرضی باید زنجیره‌ی گواهی بالای ۳۵۰۰ بایت داشته باشه، چون امضا باید داخل اون جا بشه. اسکریپت اندازه رو با `xray tls ping` می‌سنجه و اگه کمتر باشه قبول نمی‌کنه. روی زنجیره‌ی کوچیک با `--force` هم اتصال‌ها reset میشن.
+
+`pq --undo` سرور رو به VLESS معمولی برمی‌گردونه و لینک‌های قبلی دوباره کار می‌کنن.
+
 ## چک کردن سرور (audit)
 
 `sudo bash install.sh audit` فقط روی سرور خودت اجرا میشه، چیزی رو عوض نمی‌کنه و برای هر مورد یه خط `ok` یا `warn` میده:
@@ -148,6 +183,8 @@ link      sudo bash install.sh show
 - آیفون و اندروید: Hiddify 4.0.5 به بعد (+ و Add from clipboard)
 
 نسخه‌های قدیمی XHTTP رو نمی‌شناسن. اگه نمی‌تونی آپدیت کنی، سرور رو با `--vision` نصب کن.
+
+بعد از `pq` هم اپ باید هسته‌ی جدید Xray داشته باشه.
 توی بخش Routing کلاینت، سایت‌ها و آی‌پی‌های ایران رو Direct بذار؛ سرور خودش اون‌ها رو رد می‌کنه.
 
 ## چه فایل‌هایی عوض میشه
@@ -172,6 +209,7 @@ link      sudo bash install.sh show
 - **اپ لینک رو نمی‌شناسه:** اپ رو آپدیت کن یا `--vision`.
 - **چند روز کار کرد و بعد قطع شد:** احتمالاً آی‌پی مسدود شده. سرور رو با `cdn` پشت کلودفلر ببر (بالاتر توضیح دادم).
 - **پشت کلودفلر وصل نمیشه:** ابر نارنجی روشن باشه، SSL/TLS روی Full (strict) باشه نه Flexible، و `path` لینک با سرور یکی باشه. بعد یه آی‌پی تمیز دیگه با `--address` امتحان کن.
+- **بعد از `pq` وصل نمیشه:** لینک‌های قبلی دیگه کار نمی‌کنن؛ لینک رو دوباره از `show` بگیر و اپ رو آپدیت کن.
 - **`xray did not start`:** خروجی `journalctl -u xray -n 50` رو ببین.
 
 ## مجوز
@@ -204,6 +242,8 @@ What it does:
 - enables BBR when the kernel has it
 
 `sudo bash install.sh audit` (1.2.0) is read-only: one `ok`/`warn` line each for the REALITY target or the CDN name, SSH password/root login, other ports open on the public address plus the firewall, the number of links on the server (more than 5 warns), what an unauthenticated probe gets back, and whether a second transport (Hysteria2 / AmneziaWG) runs next to Xray. It exits 1 when something is worth fixing.
+
+`sudo bash install.sh pq` (1.3.0) adds VLESS Encryption to a running REALITY server: an ML-KEM-768 + X25519 hybrid key exchange inside the tunnel ([Xray-core #5067](https://github.com/XTLS/Xray-core/pull/5067)), against traffic recorded today and decrypted later. It is no faster and gets through filtering no better. Every link changes and the old ones stop working at once; `add` and a reinstall keep the layer. Links grow to about 1800 characters, about 4500 with `--mldsa`, and `show --qr` refuses anything over 2900, so use `show NAME --json`. Clients need a recent Xray core (tested with Xray 26.10.21); sing-box up to 1.14.4 has neither XHTTP nor VLESS Encryption. `--mldsa` also turns on REALITY ML-DSA-65 ([Xray-core #4915](https://github.com/XTLS/Xray-core/pull/4915)), which stops a future impostor server and does nothing for old recordings; it refuses a target whose certificate chain is 3500 bytes or less. `pq --undo` goes back to plain VLESS and the old links work again. `pq` runs on the REALITY mode only, so `cdn --undo` first.
 
 Re-running it updates Xray and keeps keys, users and links. `add NAME` / `del NAME` manage users, `show NAME --qr` prints a QR code, `show NAME --json` prints an Xray client config, `uninstall` removes everything except ufw rules.
 
