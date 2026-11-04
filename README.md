@@ -3,7 +3,7 @@
 نصب Xray با VLESS + XHTTP + REALITY روی سرور شخصی، با یه دستور.
 English version: [below](#english)
 
-آموزش ویدیویی (فارسی): کانال یوتیوب [@V7lthronyx](https://www.youtube.com/@V7lthronyx)، اینترنت آزاد فصل ۲: قسمت ۱ (نصب)، قسمت ۲ (پشت کلودفلر)، قسمت ۷ (`audit`)، قسمت ۱۰ (ضدکوانتوم).
+آموزش ویدیویی (فارسی): کانال یوتیوب [@V7lthronyx](https://www.youtube.com/@V7lthronyx)، اینترنت آزاد فصل ۲: قسمت ۱ (نصب)، قسمت ۲ (پشت کلودفلر)، قسمت ۷ (`audit`)، قسمت ۱۰ (ضدکوانتوم)، و نصب فقط با گوشی.
 
 ## چی کار می‌کنه
 
@@ -47,6 +47,62 @@ sudo bash install.sh show                  # لینک vless://
 done. your link: sudo bash install.sh show
 ```
 
+## نصب فقط با گوشی اندروید
+
+کامپیوتر لازم نیست. دکمه‌ی کپی کنار هر دستور رو بزن و توی Termux انگشتت رو نگه دار و Paste رو بزن. آموزش ویدیویی این بخش توی همون کانال یوتیوبه.
+
+۱. [Termux](https://github.com/termux/termux-app/releases/latest) رو از گیت‌هاب یا F-Droid نصب کن، بعد ابزار SSH رو نصب کن:
+
+```bash
+pkg install openssh
+```
+
+۲. آی‌پی سرور رو از گوشی خودت تست کن و وارد سرور شو (`IP_SERVER` رو عوض کن):
+
+```bash
+ping -c 3 IP_SERVER
+```
+
+```bash
+ssh root@IP_SERVER
+```
+
+۳. روی سرور، اول رمز رو عوض کن:
+
+```bash
+passwd
+```
+
+۴. اسکریپت رو بگیر و چکش کن؛ باید `install.sh: OK` ببینی:
+
+```bash
+curl -fsSLO https://github.com/v74all/xhttp-reality/releases/latest/download/install.sh
+curl -fsSLO https://github.com/v74all/xhttp-reality/releases/latest/download/install.sh.sha256
+sha256sum -c install.sh.sha256
+```
+
+۵. یه سایت برای پوشش انتخاب کن (`SITE` رو عوض کن)؛ باید `good` بده:
+
+```bash
+bash install.sh check SITE
+```
+
+۶. نصب کن:
+
+```bash
+bash install.sh --sni SITE --firewall
+```
+
+۷. لینک رو بریز توی کلیپ‌بورد گوشی:
+
+```bash
+bash install.sh show --copy
+```
+
+۸. [v2rayNG](https://github.com/2dust/v2rayNG/releases/latest) رو نصب کن، علامت + رو بزن و Import from Clipboard رو انتخاب کن، بعد دکمه‌ی پایین رو بزن.
+
+کاربر سرورت root نیست؟ اول دستورهای `install.sh` بنویس `sudo`. روی آیفون Termux نیست و این مسیر تست نشده.
+
 ## دستورها
 
 | دستور | کار |
@@ -57,6 +113,7 @@ done. your link: sudo bash install.sh show
 | `sudo bash install.sh cdn --undo` | برگشت به REALITY با همون کلیدهای قبلی |
 | `sudo bash install.sh check-cdn DOMAIN` | آیا دامنه به کلودفلر اشاره می‌کنه یا آی‌پی سرورت رو لو میده؟ |
 | `sudo bash install.sh show [NAME] [--qr]` | لینک کاربرها، با `--qr` کد QR توی ترمینال |
+| `sudo bash install.sh show [NAME] --copy` | لینک رو از راه SSH می‌ریزه توی کلیپ‌بورد گوشی یا کامپیوترت (Termux و بیشتر ترمینال‌ها) |
 | `sudo bash install.sh show NAME --json` | کانفیگ JSON کلاینت Xray (SOCKS روی 127.0.0.1:10808) |
 | `sudo bash install.sh add NAME` | کاربر جدید با UUID جدا |
 | `sudo bash install.sh del NAME` | حذف کاربر (لینکش همون لحظه از کار میفته) |
@@ -230,6 +287,8 @@ bash install.sh check www.example.com
 sudo bash install.sh --sni www.example.com --firewall
 sudo bash install.sh show
 ```
+
+On a phone over SSH, `bash install.sh show --copy` also sends the link to the phone clipboard (OSC 52; tested with Termux and v2rayNG).
 
 What it does:
 

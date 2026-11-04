@@ -8,7 +8,7 @@
 set -euo pipefail
 umask 077
 
-VERSION=1.3.0
+VERSION=1.4.0
 
 BIN=/usr/local/bin/xray
 ASSETS=/usr/local/share/xray
@@ -34,6 +34,7 @@ new_keys=0
 force=0
 qr=0
 json=0
+copy=0
 security=reality
 domain=
 cdn_address=
@@ -55,7 +56,7 @@ usage: bash install.sh [install] --sni DOMAIN [options]
        bash install.sh check DOMAIN
        bash install.sh cdn DOMAIN [--cert FILE] [--key FILE] [--address IP] | cdn --undo
        bash install.sh check-cdn DOMAIN
-       bash install.sh show [NAME] [--qr|--json]
+       bash install.sh show [NAME] [--qr|--json|--copy]
        bash install.sh pq [--mldsa] [--force] | pq --undo
        bash install.sh audit
        bash install.sh add NAME | del NAME | users
@@ -561,6 +562,15 @@ client_json() {
 EOF
 }
 
+copy_to_clipboard() {
+	if [ ! -t 1 ]; then
+		echo "not a terminal: nothing copied, select the link above" >&2
+		return
+	fi
+	printf '\033]52;c;%s\a' "$(printf '%s' "$1" | base64 | tr -d '\n')"
+	echo "sent to your clipboard. nothing pasted? select the link above by hand"
+}
+
 cmd_show() {
 	need_root
 	load_state
@@ -574,6 +584,10 @@ cmd_show() {
 		fi
 		[ -z "$name" ] && printf '%s\n' "$n"
 		link_for "$n" "$id"
+		if [ $copy -eq 1 ]; then
+			copy_to_clipboard "$(link_for "$n" "$id")"
+			return
+		fi
 		if [ $qr -eq 1 ]; then
 			have qrencode || die "qrencode is not installed"
 			[ "$(link_for "$n" "$id" | wc -c)" -le 2900 ] || die "this link is $(($(link_for "$n" "$id" | wc -c) - 1)) characters, too long for a QR code: use show --json or paste the link"
@@ -875,6 +889,7 @@ while [ $# -gt 0 ]; do
 	--force) force=1 ;;
 	--qr) qr=1 ;;
 	--json) json=1 ;;
+	--copy) copy=1 ;;
 	--cert) cert=${2:?--cert needs a file}; shift ;;
 	--key) key=${2:?--key needs a file}; shift ;;
 	--undo) undo=1 ;;
